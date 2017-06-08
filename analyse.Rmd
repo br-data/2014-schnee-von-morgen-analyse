@@ -1,0 +1,158 @@
+---
+title: "Calculation of climate trends in the Bavarian Alps"
+author: "Oliver Schnuck (oliver.schnuck@br.de), BR Data"
+output: 
+  html_document
+---
+
+This document describes the calculation of climate trends at different wheather stations in the Bavarian Alps, that we published in our project [Schnee Von Morgen](http://schnee-von-morgen.br.de). The results of our calculations are thus reproducible by knitting `./index.Rmd`, which is also part of the [archive](http://schnee-von-morgen.br.de/recherchetool/calculations.zip) including the relevant CSV-files.
+
+## Data description
+
+The files in the input folder serve as input for the calculations described below:
+
+* `./input/klima.csv` contains the average values of temperature, snowheight and snowdays in the winter half-year since 1961. The numbers trace back to the [daily values](ftp://ftp-cdc.dwd.de/pub/CDC/observations_germany/climate/daily/kl/) measured by the DWD.
+* `./input/trends.csv` contains the beginning and end of the periods, for which the trend and its significance is calculated. The longest period with no more than 2 missing values per winter half-year since 1961 is chosen.
+* `./input/stationIDs.csv` gives information about the wheather stations at which these indicators were measured. 
+
+The files in the output folder contain the results of the process after the calculations are finished. They are identical to the ones, which can be downloaded as zip-file in the info-layer of our [application](http://schnee-von-morgen.br.de/daten).
+
+* `./output/klima.csv` is identical to the input file above.
+* `./output/trends.csv` contains the values of the indicators at the beginning / end of each period under consideration - according to the calculated linear regression.
+* `./output/stationIDs.csv` ressambles the input file, complemented with the significance values of each indicator according to the Mann-Kendall-Trends.
+
+## Calculations
+
+First of all we load the csv-files that serve as input for the calculations.
+
+```{r}
+climate <- read.csv("./input/klima.csv", na.strings=".", stringsAsFactors = FALSE)
+stations <- read.csv("./input/stationIDs.csv", stringsAsFactors = FALSE)
+trends <- read.csv("./input/trends.csv", stringsAsFactors = FALSE)
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+knitr::opts_chunk$set(fig.width=12, fig.height=8,  warning=FALSE)
+
+options(scipen = 10)
+# load necessary packages
+if(!require(dplyr)) {
+  install.packages("dplyr", repos="http://cran.us.r-project.org")
+  require(dplyr)
+}
+if(!require(tidyr)) {
+  install.packages("tidyr", repos="http://cran.us.r-project.org")
+  require(tidyr)
+}
+if(!require(magrittr)) {
+  install.packages("magrittr", repos="http://cran.us.r-project.org")
+  require(magrittr)
+}
+if(!require(jsonlite)) {
+  install.packages("jsonlite", repos="http://cran.us.r-project.org")
+  require(jsonlite)
+}
+
+if(!require(Kendall)) {
+  install.packages("Kendall", repos="http://cran.us.r-project.org")
+  require(Kendall)
+}
+```
+
+After having loaded necessary libraries in the background, we calculate the linear regression and the Mann-Kendall-Trend-Tests for each station and the period of maximum length. 
+
+```{r}
+perStation <- climate %>% 
+  left_join(stations, by = c("id" = "key")) %>%
+  filter(date<=trendEnde) %>%
+  group_by(id) %>% 
+  arrange(date) %>%
+  do(
+    tempera1 = lm(temperatur ~ seq(1961, 1960 + length(temperatur)), data= .),
+    tempera2 = MannKendall(ts(.$temperatur, 1961, 1960 + length(.$temperatur), 1)),
+    schneeh1 = lm(schneehoehe ~ seq(1961, 1960 + length(schneehoehe)), data= .),
+    schneeh2 = MannKendall(ts(.$schneehoehe, 1961, 1960 + length(.$schneehoehe), 1)),  
+    schneet1 = lm(schneetage ~ seq(1961, 1960 + length(schneetage)), data= .),
+    schneet2 = MannKendall(ts(.$schneetage, 1961, 1960 + length(.$schneetage), 1))  
+  ) 
+```
+
+Now we're extracting the slope and the intercept from the linear models and the significance value of the 2-sided Mann-Kendall-Tests.
+
+```{r}
+perStation <- perStation %>%  
+  mutate(
+    slope_tempera=summary(tempera1)$coeff[2],
+    intercept_tempera=summary(tempera1)$coeff[1],
+    S_tempera= tempera2$S,
+    varS_tempera = tempera2$varS,
+    p_value_tempera=tempera2$sl,
+    sig_tempera=(1-p_value_tempera)*100
+    #sig2=1-2*(1-pnorm(abs((S-1)/(sqrt(54*53*(2*54+5)/18)))))
+  )
+
+perStation <- perStation %>%  
+  mutate(
+    slope_schneeh=summary(schneeh1)$coeff[2],
+    intercept_schneeh=summary(schneeh1)$coeff[1],
+    S_schneeh= schneeh2$S,
+    varS_schneeh = schneeh2$varS,
+    p_value_schneeh=schneeh2$sl,
+    sig_schneeh=(1-p_value_schneeh)*100
+  )
+  
+perStation <- perStation %>%  
+  mutate(
+    slope_schneet=summary(schneet1)$coeff[2],
+    intercept_schneet=summary(schneet1)$coeff[1],
+    S_schneet= schneet2$S,
+    varS_schneet = schneet2$varS,
+    p_value_schneet=schneet2$sl,
+    sig_schneet=(1-p_value_schneet)*100
+  ) 
+```
+
+See the results e.g. of the calculated significance values in percent:
+
+```{r}
+perStation %>%
+  select(
+    id, sig_tempera, sig_schneeh, sig_schneet
+  )
+```
+
+Now, we prepare the data that is written to the output-files.
+
+```{r}
+stations <- stations %>%
+  left_join(perStation, by = c("key" = "id")) %>%
+  mutate(
+    temperaS = sig_tempera,
+    schneehS = sig_schneeh,
+    schneetS = sig_schneet,
+    trendEnde = substring(trendEnde, 1, 4)
+  ) %>%
+  select(key,name,hoehe,trendEnde,temperaS,schneehS,schneetS)
+  
+trends <- trends %>%
+  left_join(perStation, by = c("id" = "id")) %>%
+  mutate(
+    tempera = as.numeric(substring(date, 1, 4)) * slope_tempera + intercept_tempera,
+    schneeh = as.numeric(substring(date, 1, 4)) * slope_schneeh + intercept_schneeh,
+    schneet = as.numeric(substring(date, 1, 4)) * slope_schneet + intercept_schneet
+  ) %>%
+  select(
+    id, date, tempera, schneeh, schneet
+  )
+
+trends
+```
+
+Finally, we write the results to the CSV-files: 
+
+```{r}
+write.csv(trends, "./output/trends.csv", quote=FALSE, row.names=FALSE)
+write.csv(stations, "./output/stationIDs.csv", quote=FALSE, row.names=FALSE)
+file.copy("./input/klima.csv", "./output/klima.csv", overwrite=TRUE)
+```
